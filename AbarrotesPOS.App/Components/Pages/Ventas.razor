@@ -1,0 +1,157 @@
+@page "/ventas"
+@using AbarrotesPOS.Data
+@using AbarrotesPOS.Shared
+@using AbarrotesPOS.Services
+@using Microsoft.EntityFrameworkCore
+@inject AppDbContext DbContext
+@inject UserSessionService UserSession
+@rendermode InteractiveServer
+
+<PageTitle>Ventas</PageTitle>
+
+<div class="container">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h1 class="mb-0">Historial de Ventas</h1>
+            <p class="text-muted mb-0">Consulta los tickets registrados y sus detalles.</p>
+        </div>
+        <button class="btn btn-outline-primary" @onclick="CargarVentas">
+            <i class="bi bi-arrow-clockwise me-1"></i> Actualizar
+        </button>
+    </div>
+
+    @if (cargando)
+    {
+        <div class="text-center my-5">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Cargando...</span>
+            </div>
+        </div>
+    }
+    else if (!ventas.Any())
+    {
+        <div class="alert alert-info shadow-sm">
+            <i class="bi bi-info-circle me-2"></i>
+            No hay ventas registradas para mostrar.
+        </div>
+    }
+    else
+    {
+        <div class="table-responsive shadow-sm">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-dark">
+                    <tr>
+                        <th>Ticket</th>
+                        <th>Fecha</th>
+                        <th>Usuario</th>
+                        <th>Cliente</th>
+                        <th class="text-end">Total</th>
+                        <th class="text-center">Detalles</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var venta in ventas)
+                    {
+                        <tr>
+                            <td class="fw-bold">#@venta.Id</td>
+                            <td>@venta.FechaVenta.ToString("dd/MM/yyyy HH:mm")</td>
+                            <td>@(venta.Usuario?.NombreCompleto ?? venta.Usuario?.NombreUsuario ?? "Sin usuario")</td>
+                            <td>@(venta.Cliente?.Nombre ?? "Cliente casual")</td>
+                            <td class="text-end fw-bold text-success">@venta.Total.ToString("C")</td>
+                            <td class="text-center">
+                                <button class="btn btn-sm btn-outline-primary" @onclick="() => AlternarDetalles(venta.Id)">
+                                    @(ventaExpandidaId == venta.Id ? "Ocultar" : "Ver")
+                                </button>
+                            </td>
+                        </tr>
+
+                        @if (ventaExpandidaId == venta.Id)
+                        {
+                            <tr class="table-light">
+                                <td colspan="6" class="p-0">
+                                    <table class="table table-sm mb-0">
+                                        <thead>
+                                            <tr>
+                                                <th>Producto</th>
+                                                <th class="text-center">Cantidad</th>
+                                                <th class="text-end">Precio</th>
+                                                <th class="text-end">Subtotal</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var detalle in venta.Detalles)
+                                            {
+                                                <tr>
+                                                    <td>
+                                                        <span class="fw-semibold">@(detalle.Producto?.Nombre ?? "Producto eliminado")</span>
+                                                        @if (!string.IsNullOrWhiteSpace(detalle.Producto?.CodigoBarras))
+                                                        {
+                                                            <small class="text-muted font-monospace ms-2">@detalle.Producto.CodigoBarras</small>
+                                                        }
+                                                    </td>
+                                                    <td class="text-center">@detalle.Cantidad</td>
+                                                    <td class="text-end">@detalle.PrecioVenta.ToString("C")</td>
+                                                    <td class="text-end fw-bold">@((detalle.Cantidad * detalle.PrecioVenta).ToString("C"))</td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        <small class="text-muted d-block mt-2">
+            Mostrando las últimas @ventas.Count ventas.
+            @if (!UserSession.EsAdmin)
+            {
+                <span>Como cajero solo ves tus propias ventas.</span>
+            }
+        </small>
+    }
+</div>
+
+@code {
+    private List<Venta> ventas = new();
+    private bool cargando = true;
+    private int? ventaExpandidaId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await CargarVentas();
+    }
+
+    private async Task CargarVentas()
+    {
+        cargando = true;
+
+        var query = DbContext.Ventas
+            .AsNoTracking()
+            .Include(v => v.Usuario)
+            .Include(v => v.Cliente)
+            .Include(v => v.Detalles)
+                .ThenInclude(d => d.Producto)
+            .AsQueryable();
+
+        if (!UserSession.EsAdmin && UserSession.UsuarioActual != null)
+        {
+            int usuarioId = UserSession.UsuarioActual.Id;
+            query = query.Where(v => v.UsuarioId == usuarioId);
+        }
+
+        ventas = await query
+            .OrderByDescending(v => v.FechaVenta)
+            .Take(100)
+            .ToListAsync();
+
+        cargando = false;
+    }
+
+    private void AlternarDetalles(int ventaId)
+    {
+        ventaExpandidaId = ventaExpandidaId == ventaId ? null : ventaId;
+    }
+}

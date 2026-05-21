@@ -7,15 +7,15 @@ namespace AbarrotesPOS.Data.Repositories;
 
 public class ProductoRepository : IProductoRepository
 {
-    private readonly AppDbContext _context;
+    private readonly IDbContextFactory<AppDbContext> _contextFactory;
     private readonly IMemoryCache _cache;
 
     // Prefijo para invalidar el caché fácilmente al guardar/eliminar
     private const string CachePrefix = "productos_search_";
 
-    public ProductoRepository(AppDbContext context, IMemoryCache cache)
+    public ProductoRepository(IDbContextFactory<AppDbContext> contextFactory, IMemoryCache cache)
     {
-        _context = context;
+        _contextFactory = contextFactory;
         _cache = cache;
     }
 
@@ -24,7 +24,9 @@ public class ProductoRepository : IProductoRepository
     public async Task<PagedResult<Producto>> GetProductosPaginados(
         int page, int pageSize, string? search = null)
     {
-        var query = _context.Productos
+        await using var context = await _contextFactory.CreateDbContextAsync();
+
+        var query = context.Productos
             .Include(p => p.Categoria)
             .Include(p => p.Proveedor)
             .AsQueryable();
@@ -47,7 +49,7 @@ public class ProductoRepository : IProductoRepository
         return new PagedResult<Producto>(items, total, page, pageSize);
     }
 
-    // ─── Búsqueda rápida con caché (para PuntoDeVenta) ──────────────────────
+    // ─── Búsqueda rápida para PuntoDeVenta ───────────────────────────────────
 
     public async Task<List<ProductoDto>> SearchAsync(string term, int take = 10)
     {
@@ -55,37 +57,39 @@ public class ProductoRepository : IProductoRepository
         if (string.IsNullOrWhiteSpace(term))
             return new List<ProductoDto>();
 
-        var cacheKey = $"{CachePrefix}{term.ToLower().Trim()}";
+        term = term.Trim();
 
-        return await _cache.GetOrCreateAsync(cacheKey, async entry =>
-        {
-            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5);
+        // Importante: no usar caché aquí. En ventas se necesita ver stock/precio actual
+        // y evitar que varias búsquedas rápidas se queden atoradas con datos viejos.
+        await using var context = await _contextFactory.CreateDbContextAsync();
 
-            return await _context.Productos
-                .Where(p =>
-                    p.Nombre.Contains(term) ||
-                    (p.CodigoBarras != null && p.CodigoBarras.Contains(term)))
-                .OrderBy(p => p.Nombre)
-                .Take(take)
-                .Select(p => new ProductoDto
-                {
-                    Id = p.Id,
-                    Nombre = p.Nombre,
-                    CodigoBarras = p.CodigoBarras,
-                    PrecioVenta = p.PrecioVenta,
-                    Stock = p.Stock,
-                    CategoriaNombre = p.Categoria != null ? p.Categoria.Nombre : string.Empty,
-                    ProveedorNombre = p.Proveedor != null ? p.Proveedor.Nombre : string.Empty
-                })
-                .ToListAsync();
-        }) ?? new List<ProductoDto>();
+        return await context.Productos
+            .AsNoTracking()
+            .Where(p =>
+                p.Nombre.Contains(term) ||
+                (p.CodigoBarras != null && p.CodigoBarras.Contains(term)))
+            .OrderBy(p => p.Nombre)
+            .Take(take)
+            .Select(p => new ProductoDto
+            {
+                Id = p.Id,
+                Nombre = p.Nombre,
+                CodigoBarras = p.CodigoBarras,
+                PrecioVenta = p.PrecioVenta,
+                Stock = p.Stock,
+                CategoriaNombre = p.Categoria != null ? p.Categoria.Nombre : string.Empty,
+                ProveedorNombre = p.Proveedor != null ? p.Proveedor.Nombre : string.Empty
+            })
+            .ToListAsync();
     }
 
     // ─── Métodos auxiliares ──────────────────────────────────────────────────
 
     public async Task<Producto?> GetByIdAsync(int id)
     {
-        return await _context.Productos
+        await using var context = await _contextFactory.CreateDbContextAsync();
+
+        return await context.Productos
             .Include(p => p.Categoria)
             .Include(p => p.Proveedor)
             .FirstOrDefaultAsync(p => p.Id == id);
@@ -93,7 +97,9 @@ public class ProductoRepository : IProductoRepository
 
     public async Task<List<Producto>> GetBajoStockAsync()
     {
-        return await _context.Productos
+        await using var context = await _contextFactory.CreateDbContextAsync();
+
+        return await context.Productos
             .Include(p => p.Categoria)
             .Where(p => p.Stock <= p.StockMinimo)
             .OrderBy(p => p.Stock)

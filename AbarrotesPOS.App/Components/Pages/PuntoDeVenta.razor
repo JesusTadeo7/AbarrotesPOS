@@ -1,4 +1,4 @@
-﻿@page "/puntodeventa"
+@page "/puntodeventa"
 @using AbarrotesPOS.Data
 @using AbarrotesPOS.Data.Repositories
 @using AbarrotesPOS.Shared
@@ -210,6 +210,7 @@
     private List<ItemCarrito> carrito = new();
     private List<Cliente>? listaClientes;
     private int? clienteSeleccionadoId = null;
+    private readonly SemaphoreSlim _semaforoBusqueda = new(1, 1);
 
     private decimal Total => carrito.Sum(x => x.Cantidad * x.PrecioVenta);
     private int puntosGanados => (int)(Total / 10);
@@ -221,21 +222,35 @@
         listaClientes = await DbContext.Clientes.OrderBy(c => c.Nombre).ToListAsync();
     }
 
-    // ─── Búsqueda con caché via ProductoRepository ───────────────────────────
+    // ─── Búsqueda de productos ───────────────────────────────────────────────
 
     private async Task BuscarProductos(ChangeEventArgs e)
     {
-        terminoBusqueda = e.Value?.ToString() ?? string.Empty;
+        var terminoActual = e.Value?.ToString() ?? string.Empty;
+        terminoBusqueda = terminoActual;
 
-        if (string.IsNullOrWhiteSpace(terminoBusqueda))
+        if (string.IsNullOrWhiteSpace(terminoActual))
         {
             productosEncontrados.Clear();
             return;
         }
 
-        // SearchAsync usa IMemoryCache: si el mismo término se buscó en los
-        // últimos 5 minutos, devuelve el resultado sin ir a la BD.
-        productosEncontrados = await ProductoRepo.SearchAsync(terminoBusqueda, take: 10);
+        // Blazor Server dispara @oninput muy rápido al escribir.
+        // Este semáforo evita dos consultas al mismo DbContext al mismo tiempo.
+        await _semaforoBusqueda.WaitAsync();
+        try
+        {
+            var resultado = await ProductoRepo.SearchAsync(terminoActual, take: 10);
+
+            // Si el usuario siguió escribiendo mientras cargaba la búsqueda,
+            // no pintamos resultados viejos.
+            if (terminoBusqueda == terminoActual)
+                productosEncontrados = resultado;
+        }
+        finally
+        {
+            _semaforoBusqueda.Release();
+        }
     }
 
     // ─── Carrito ─────────────────────────────────────────────────────────────
@@ -288,57 +303,120 @@
     {
         if (!carrito.Any()) return;
 
+        if (UserSession.UsuarioActual == null)
+        {
+            await JS.InvokeVoidAsync("alert", "Debes iniciar sesión antes de realizar una venta.");
+            return;
+        }
+
+        if (carrito.Any(x => x.Cantidad <= 0))
+        {
+            await JS.InvokeVoidAsync("alert", "Hay productos con cantidad inválida.");
+            return;
+        }
+
         using var transaction = await DbContext.Database.BeginTransactionAsync();
+
         try
         {
-            // 1. Crear la venta
+            var idsProductos = carrito.Select(x => x.ProductoId).ToList();
+
+            var productosDb = await DbContext.Productos
+                .Where(p => idsProductos.Contains(p.Id))
+                .ToListAsync();
+
+            if (productosDb.Count != carrito.Count)
+            {
+                await JS.InvokeVoidAsync("alert", "Uno o más productos del carrito ya no existen.");
+                return;
+            }
+
+            foreach (var item in carrito)
+            {
+                var productoDb = productosDb.First(p => p.Id == item.ProductoId);
+
+                if (productoDb.Stock < item.Cantidad)
+                {
+                    await JS.InvokeVoidAsync("alert", $"No hay suficiente stock de {productoDb.Nombre}. Disponible: {productoDb.Stock}.");
+                    return;
+                }
+
+                if (productoDb.PrecioVenta <= 0)
+                {
+                    await JS.InvokeVoidAsync("alert", $"El producto {productoDb.Nombre} tiene precio inválido.");
+                    return;
+                }
+            }
+
+            Cliente? clienteDb = null;
+            if (clienteSeleccionadoId.HasValue && clienteSeleccionadoId.Value > 0)
+            {
+                clienteDb = await DbContext.Clientes.FindAsync(clienteSeleccionadoId.Value);
+                if (clienteDb == null)
+                {
+                    await JS.InvokeVoidAsync("alert", "El cliente seleccionado ya no existe.");
+                    return;
+                }
+            }
+
+            decimal totalReal = carrito.Sum(item =>
+            {
+                var productoDb = productosDb.First(p => p.Id == item.ProductoId);
+                return item.Cantidad * productoDb.PrecioVenta;
+            });
+
             var nuevaVenta = new Venta
             {
                 FechaVenta = DateTime.Now,
-                Total = Total,
-                UsuarioId = UserSession.UsuarioActual?.Id ?? 1,
-                ClienteId = (clienteSeleccionadoId.HasValue && clienteSeleccionadoId > 0)
-                             ? clienteSeleccionadoId : null
+                Total = totalReal,
+                UsuarioId = UserSession.UsuarioActual.Id,
+                ClienteId = clienteDb?.Id,
+                Detalles = new List<VentaDetalle>()
             };
-            DbContext.Ventas.Add(nuevaVenta);
-            await DbContext.SaveChangesAsync();
 
-            // 2. Guardar detalles y descontar stock
             foreach (var item in carrito)
             {
-                DbContext.VentaDetalles.Add(new VentaDetalle
+                var productoDb = productosDb.First(p => p.Id == item.ProductoId);
+
+                nuevaVenta.Detalles.Add(new VentaDetalle
                 {
-                    VentaId = nuevaVenta.Id,
-                    ProductoId = item.ProductoId,
-                    PrecioVenta = item.PrecioVenta,
+                    ProductoId = productoDb.Id,
+                    PrecioVenta = productoDb.PrecioVenta,
                     Cantidad = item.Cantidad
                 });
 
-                var prodDb = await DbContext.Productos.FindAsync(item.ProductoId);
-                if (prodDb != null) prodDb.Stock -= item.Cantidad;
+                productoDb.Stock -= item.Cantidad;
             }
 
-            // 3. Sumar puntos de fidelidad
-            if (clienteSeleccionadoId.HasValue && clienteSeleccionadoId > 0)
+            int puntosGenerados = (int)(totalReal / 10);
+            if (clienteDb != null)
             {
-                var clienteDb = await DbContext.Clientes.FindAsync(clienteSeleccionadoId.Value);
-                if (clienteDb != null) clienteDb.Puntos += puntosGanados;
+                clienteDb.Puntos += puntosGenerados;
             }
 
+            DbContext.Ventas.Add(nuevaVenta);
             await DbContext.SaveChangesAsync();
             await transaction.CommitAsync();
 
-            int puntosGenerados = puntosGanados;
+            ProductoRepo.InvalidarCache();
+            await RefrescarClientes();
             LimpiarCarrito();
 
-            string msg = "¡Venta exitosa!";
-            if (puntosGenerados > 0) msg += $" El cliente ganó {puntosGenerados} puntos.";
+            string msg = $"¡Venta exitosa! Total cobrado: {totalReal:C}";
+            if (puntosGenerados > 0 && clienteDb != null)
+                msg += $" El cliente ganó {puntosGenerados} puntos.";
+
             await JS.InvokeVoidAsync("alert", msg);
         }
         catch (Exception ex)
         {
             await transaction.RollbackAsync();
-            await JS.InvokeVoidAsync("alert", "Error al procesar: " + ex.Message);
+            await JS.InvokeVoidAsync("alert", "Error al procesar la venta: " + ex.Message);
         }
+    }
+
+    private async Task RefrescarClientes()
+    {
+        listaClientes = await DbContext.Clientes.OrderBy(c => c.Nombre).ToListAsync();
     }
 }

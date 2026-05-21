@@ -3,7 +3,7 @@
 @using AbarrotesPOS.Data.Repositories
 @using AbarrotesPOS.Shared
 @using Microsoft.EntityFrameworkCore
-@inject AppDbContext DbContext
+@inject IDbContextFactory<AppDbContext> DbFactory
 @inject IProductoRepository ProductoRepo
 @rendermode InteractiveServer
 
@@ -284,8 +284,10 @@
 
     private async Task CargarCatalogos()
     {
-        listaCategorias  = await DbContext.Categorias.OrderBy(c => c.Nombre).ToListAsync();
-        listaProveedores = await DbContext.Proveedores.OrderBy(p => p.Nombre).ToListAsync();
+        await using var db = await DbFactory.CreateDbContextAsync();
+
+        listaCategorias  = await db.Categorias.AsNoTracking().OrderBy(c => c.Nombre).ToListAsync();
+        listaProveedores = await db.Proveedores.AsNoTracking().OrderBy(p => p.Nombre).ToListAsync();
     }
 
     private async Task CargarDatos()
@@ -381,34 +383,43 @@
     {
         if (productoActual.CategoriaId == 0 || productoActual.ProveedorId == 0) return;
 
+        await using var dbContext = await DbFactory.CreateDbContextAsync();
+
         if (productoActual.Id == 0)
         {
-            DbContext.Productos.Add(productoActual);
+            dbContext.Productos.Add(productoActual);
         }
         else
         {
-            var db = await DbContext.Productos.FindAsync(productoActual.Id);
-            if (db != null)
+            var productoDb = await dbContext.Productos.FindAsync(productoActual.Id);
+            if (productoDb != null)
             {
-                db.Nombre       = productoActual.Nombre;
-                db.CodigoBarras = productoActual.CodigoBarras;
-                db.PrecioVenta  = productoActual.PrecioVenta;
-                db.Stock        = productoActual.Stock;
-                db.StockMinimo  = productoActual.StockMinimo;
-                db.CategoriaId  = productoActual.CategoriaId;
-                db.ProveedorId  = productoActual.ProveedorId;
+                productoDb.Nombre       = productoActual.Nombre;
+                productoDb.CodigoBarras = productoActual.CodigoBarras;
+                productoDb.PrecioVenta  = productoActual.PrecioVenta;
+                productoDb.Stock        = productoActual.Stock;
+                productoDb.StockMinimo  = productoActual.StockMinimo;
+                productoDb.CategoriaId  = productoActual.CategoriaId;
+                productoDb.ProveedorId  = productoActual.ProveedorId;
             }
         }
 
-        await DbContext.SaveChangesAsync();
+        await dbContext.SaveChangesAsync();
         await CargarDatos();
         CerrarModal();
     }
 
     private async Task EliminarProducto(Producto producto)
     {
-        DbContext.Productos.Remove(producto);
-        await DbContext.SaveChangesAsync();
+        await using var dbContext = await DbFactory.CreateDbContextAsync();
+
+        var productoDb = await dbContext.Productos.FindAsync(producto.Id);
+        if (productoDb != null)
+        {
+            dbContext.Productos.Remove(productoDb);
+            await dbContext.SaveChangesAsync();
+        }
+
         await CargarDatos();
     }
 }

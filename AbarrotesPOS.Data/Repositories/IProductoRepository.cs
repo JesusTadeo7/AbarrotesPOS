@@ -1,4 +1,4 @@
-﻿using AbarrotesPOS.Shared;
+using AbarrotesPOS.Shared;
 using AbarrotesPOS.Shared.DTOs;
 
 namespace AbarrotesPOS.Data.Repositories;
@@ -13,4 +13,5 @@ public interface IProductoRepository
 
     Task<Producto?> GetByIdAsync(int id);
     Task<List<Producto>> GetBajoStockAsync();
+    void InvalidarCache();
 }

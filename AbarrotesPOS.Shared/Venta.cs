@@ -1,4 +1,4 @@
-﻿using System.ComponentModel.DataAnnotations.Schema;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace AbarrotesPOS.Shared;
 
@@ -16,8 +16,9 @@ public class Venta
     public Usuario Usuario { get; set; }
     public int? ClienteId { get; set; }
 
-    public Cliente? Cliente { get; set; }
     [ForeignKey("ClienteId")]
+    public Cliente? Cliente { get; set; }
+
     // Propiedad de navegación para los detalles de la venta
     public List<VentaDetalle> Detalles { get; set; } = new();
 }
